@@ -40,9 +40,12 @@ class JinaSearchProvider(BaseSearchProvider):
         self.supported_engines = ["jina"]  # Jina only supports its own search
 
         # Configure session headers according to Jina API documentation
+        # Use browser-like User-Agent to avoid anti-bot measures in different regions
         self.headers = {
             "Accept": "application/json",
-            "User-Agent": "ApeRAG-WebSearch/1.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
             "X-Respond-With": "no-content",
         }
         if self.api_key:
@@ -109,9 +112,10 @@ class JinaSearchProvider(BaseSearchProvider):
             # Prepare headers with locale and additional options based on Jina docs
             request_headers = self.headers.copy()
             if locale:
-                # Convert locale to Accept-Language header format
+                # Convert locale to Accept-Language header format and enhance default
                 accept_language = locale.replace("_", "-")
-                request_headers["Accept-Language"] = accept_language
+                # Combine with default languages for better compatibility
+                request_headers["Accept-Language"] = f"{accept_language},en-US;q=0.9,en;q=0.8,zh-CN;q=0.7,zh;q=0.6"
 
             # Add Jina-specific headers for better control
             # X-Return-Format controls response format
