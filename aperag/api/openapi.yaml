@@ -29,6 +29,8 @@ paths:
     $ref: './paths/flow.yaml#/flow'
   /bots/{bot_id}/flow/debug:
     $ref: './paths/bots.yaml#/debugFlow'
+  /bots/{bot_id}/sharing:
+    $ref: './paths/bots.yaml#/botSharing'
 
   # chats
   /bots/{bot_id}/chats:
@@ -115,6 +117,16 @@ paths:
     $ref: './paths/marketplace.yaml#/marketplaceCollectionDocumentObject'
   /marketplace/collections/{collection_id}/graph:
     $ref: './paths/marketplace.yaml#/marketplaceCollectionGraph'
+  
+  # Bot marketplace
+  /marketplace/bots:
+    $ref: './paths/marketplace.yaml#/marketplaceBots'
+  /marketplace/bots/subscriptions:
+    $ref: './paths/marketplace.yaml#/marketplaceBotsSubscriptions'
+  /marketplace/bots/{bot_id}/subscribe:
+    $ref: './paths/marketplace.yaml#/marketplaceBotSubscribe'
+  /marketplace/bots/{bot_id}:
+    $ref: './paths/marketplace.yaml#/marketplaceBot'
 
   # apikeys
   /apikeys:
