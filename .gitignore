@@ -159,7 +159,7 @@ terraform.tfstate.backup
 .terraform
 .mirrord
 requirements.txt
-/documents
+# /documents
 magic-pdf.json
 .cursor
 .objects/
