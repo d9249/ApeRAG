@@ -1,0 +1,196 @@
+volumes:
+  doc-postgres-data: {}
+  doc-redis-data: {}
+  doc-qdrant-data: {}
+  doc-es-data: {}
+  doc-shared-data: {}
+
+services:
+  # ==============================================
+  # Document Processing Pipeline API
+  # ==============================================
+  doc-api:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: doc-pipeline-api
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - doc-shared-data:/shared
+      - ./uploads:/app/uploads
+    environment:
+      # Database
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/doc_pipeline
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DATABASE=doc_pipeline
+      
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis 
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      
+      # Vector Store (Qdrant)
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_URL=http://qdrant:6333
+      
+      # Elasticsearch
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_PORT=9200
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      
+      # Application
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - LOG_LEVEL=INFO
+      - SHARED_DATA_PATH=/shared
+      - UPLOAD_PATH=/app/uploads
+      
+      # Celery
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      
+    ports:
+      - "8000:8000"
+    command: ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Celery Worker for document processing
+  doc-worker:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: doc-pipeline-worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - doc-shared-data:/shared
+      - ./uploads:/app/uploads
+    environment:
+      # Database
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/doc_pipeline
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DATABASE=doc_pipeline
+      
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      
+      # Vector Store (Qdrant)
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_URL=http://qdrant:6333
+      
+      # Elasticsearch
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_PORT=9200
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      
+      # Application
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - LOG_LEVEL=INFO
+      - SHARED_DATA_PATH=/shared
+      - UPLOAD_PATH=/app/uploads
+      
+      # Celery
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      
+    command: ["celery", "-A", "worker", "worker", "--loglevel=info", "--concurrency=2"]
+
+  # ==============================================
+  # Infrastructure Services 
+  # ==============================================
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: doc-pipeline-postgres
+    volumes:
+      - doc-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=doc_pipeline
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d doc_pipeline"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:6
+    container_name: doc-pipeline-redis
+    volumes:
+      - doc-redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    container_name: doc-pipeline-qdrant
+    volumes:
+      - doc-qdrant-data:/qdrant/storage
+    ports:
+      - "6333:6333"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 6333 || timeout 3 bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  elasticsearch:
+    image: elasticsearch:8.8.2
+    container_name: doc-pipeline-elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      - "discovery.type=single-node"
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - "xpack.security.enabled=false"
+    volumes:
+      - doc-es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
