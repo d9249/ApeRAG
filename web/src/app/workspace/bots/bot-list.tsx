@@ -100,7 +100,7 @@ export const BotList = ({ bots: initBots }: { bots: Bot[] }) => {
         </div>
         <div className="ml-auto flex items-center gap-2">
           <Button asChild>
-            <Link href="/bots/new">
+            <Link href="/workspace/bots/new">
               <Plus /> {page_bot('new_bot')}
             </Link>
           </Button>

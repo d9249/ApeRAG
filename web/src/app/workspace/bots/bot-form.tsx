@@ -214,7 +214,7 @@ export const BotForm = ({
           },
         });
         if (res.data.id) {
-          router.push(`/bots/${res.data.id}/chats`);
+          router.push(`/workspace/bots/${res.data.id}/chats`);
         }
       }
 
