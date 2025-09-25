@@ -1,19 +1,22 @@
+agentConfig:
+  type: object
+  properties:
+    completion:
+      $ref: './model.yaml#/modelSpec'
+    system_prompt_template:
+      type: string
+    query_prompt_template:
+      type: string
+    collections:
+      type: array
+      items:
+        $ref: './collection.yaml#/collection'
+
 botConfig:
   type: object
   properties:
     agent:
-      type: object
-      properties:
-        completion:
-          $ref: './model.yaml#/modelSpec'
-        system_prompt_template:
-          type: string
-        query_prompt_template:
-          type: string
-        collections:
-          type: array
-          items:
-            $ref: './collection.yaml#/collection'
+      $ref: '#/agentConfig'
     flow:
       $ref: './flow.yaml#/components/schemas/WorkflowDefinition'
 
@@ -92,3 +95,60 @@ debugFlowRequest:
       type: string
   required:
     - query
+
+botPublishRequest:
+  type: object
+  properties:
+    group_ids:
+      type: array
+      items:
+        type: string
+      description: List of department IDs to publish to, or ["*"] for global publishing
+      example: ["*", "dp_1", "dp_2"]
+  required:
+    - group_ids
+
+botMarketplace:
+  type: object
+  properties:
+    id:
+      type: string
+      description: Marketplace entry ID
+    bot_id:
+      type: string
+      description: Bot ID
+    group_id:
+      type: string
+      description: Department ID or "*" for global
+    status:
+      type: string
+      enum: [DRAFT, PUBLISHED]
+      description: Publishing status
+    published_at:
+      type: string
+      format: date-time
+      description: When the bot was published
+
+marketplaceBotList:
+  type: object
+  description: List of marketplace bots accessible to user
+  properties:
+    items:
+      type: array
+      items:
+        allOf:
+          - $ref: '#/bot'
+          - type: object
+            properties:
+              group_id:
+                type: string
+                description: The department this bot is published to
+              published_at:
+                type: string
+                format: date-time
+                description: When the bot was published
+              owner_username:
+                type: string
+                description: Username of the bot owner
+    pageResult:
+      $ref: './common.yaml#/pageResult'

@@ -31,7 +31,7 @@ from httpx_oauth.clients.github import GitHubOAuth2
 from httpx_oauth.clients.google import GoogleOAuth2
 
 from aperag.config import AsyncSessionDep, settings
-from aperag.db.models import ApiKey, ApiKeyStatus, Invitation, OAuthAccount, Role, User
+from aperag.db.models import ApiKey, ApiKeyStatus, Department, DepartmentStatus, Invitation, OAuthAccount, Role, User
 from aperag.db.ops import async_db_ops
 from aperag.schema import view_models
 from aperag.utils.audit_decorator import audit
@@ -309,6 +309,14 @@ async def authenticate_anybase_token(request: Request, session: AsyncSessionDep)
     anybase_phone = anybase_user_data.get("phone")
     anybase_user_role = anybase_user_data.get("role")
     
+    # Extract new department and tenant info
+    anybase_user_tenant_id = anybase_user_data.get("tenant_id")
+    anybase_user_tenant_name = anybase_user_data.get("tenant_name")
+    anybase_user_deps_id = anybase_user_data.get("deps_id")
+    anybase_user_deps_name = anybase_user_data.get("deps_name")
+    anybase_tenant_list = anybase_user_data.get("tenant_list", [])
+    anybase_deps_list = anybase_user_data.get("deps_list", [])
+    
     if not anybase_user_code:
         logger.error("Anybase user data missing user_id")
         return None
@@ -320,12 +328,25 @@ async def authenticate_anybase_token(request: Request, session: AsyncSessionDep)
     user = result.scalars().first()
     
     if user:
-        # User exists, mark authentication method and return
+        # User exists, sync department data and update user department
+        await sync_anybase_departments(session, anybase_deps_list)
+        
+        # Update user's department_id if it has changed
+        if user.department_id != anybase_user_deps_id:
+            user.department_id = anybase_user_deps_id
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+        
+        # Mark authentication method and return
         user._auth_method = "anybase_token"
         return user
     
     # User doesn't exist, create new user automatically
     try:
+        # Sync department data first
+        await sync_anybase_departments(session, anybase_deps_list)
+        
         user_manager = UserManager(SQLAlchemyUserDatabase(session, User))
         
         # Create user with Anybase data
@@ -334,6 +355,7 @@ async def authenticate_anybase_token(request: Request, session: AsyncSessionDep)
             email=anybase_email or f"{anybase_user_code}@anybase.local",  # Use email or generate one
             hashed_password=user_manager.password_helper.hash(secrets.token_urlsafe(32)),  # Random password
             role=Role.ADMIN if "admin" in anybase_user_role else Role.RO,
+            department_id=anybase_user_deps_id,  # Set user's department
             is_active=True,
             is_verified=True,
             date_joined=utc_now(),
@@ -760,3 +782,206 @@ async def delete_user_view(
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     await async_db_ops.delete_user(session, target)
     return {"message": "User deleted successfully"}
+
+
+async def sync_anybase_departments(session, deps_list: list):
+    """Sync department data from Anybase to ApeRAG database for all tenants"""
+    if not deps_list:
+        return
+
+    # Group departments by tenant_id
+    departments_by_tenant = {}
+    for dept_data in deps_list:
+        dept_id = dept_data.get("id")
+        dept_name = dept_data.get("name")
+        parent_id = dept_data.get("parent_id", "-1")
+        group_path = dept_data.get("group_path", f"/{dept_id}")
+        tenant_id = dept_data.get("tenant_id")
+
+        if not dept_id or not dept_name or not tenant_id:
+            logger.warning(f"Incomplete department data: {dept_data}")
+            continue
+
+        if tenant_id not in departments_by_tenant:
+            departments_by_tenant[tenant_id] = []
+
+        department_data = {
+            "id": dept_id,
+            "parent_id": parent_id,
+            "name": dept_name,
+            "status": DepartmentStatus.ACTIVE,
+            "group_path": group_path,
+            "tenant_id": tenant_id,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+        }
+        departments_by_tenant[tenant_id].append(department_data)
+
+    if not departments_by_tenant:
+        logger.warning("No valid department data found")
+        return
+
+    # Sync departments for each tenant
+    for tenant_id, departments_data in departments_by_tenant.items():
+        await sync_tenant_departments(session, tenant_id, departments_data)
+
+
+async def sync_tenant_departments(session, tenant_id: str, departments_data: list):
+    """Sync department data for a specific tenant"""
+    anybase_dept_ids = {dept["id"] for dept in departments_data}
+
+    try:
+        # Get existing departments for this tenant in database
+        existing_departments = await async_db_ops.get_departments_by_tenant_id(tenant_id)
+        existing_dept_ids = {dept.id for dept in existing_departments}
+
+        # Find departments to delete (exist in database but not in Anybase)
+        departments_to_delete = existing_dept_ids - anybase_dept_ids
+
+        # Delete departments that no longer exist in Anybase
+        if departments_to_delete:
+            # Check if any users are still assigned to departments being deleted
+            from sqlalchemy import select
+            stmt = select(User).where(
+                User.department_id.in_(departments_to_delete),
+                User.is_active.is_(True),
+                User.gmt_deleted.is_(None)
+            )
+            result = await session.execute(stmt)
+            users_in_deleted_depts = result.scalars().all()
+
+            if users_in_deleted_depts:
+                # Don't delete departments that still have active users
+                logger.warning(f"Cannot delete departments {departments_to_delete} because they still have {len(users_in_deleted_depts)} active users")
+                # Remove these departments from deletion list
+                departments_to_delete = departments_to_delete - {user.department_id for user in users_in_deleted_depts}
+
+            if departments_to_delete:
+                from sqlalchemy import delete
+                stmt = delete(Department).where(
+                    Department.tenant_id == tenant_id,
+                    Department.id.in_(departments_to_delete)
+                )
+                result = await session.execute(stmt)
+                deleted_count = result.rowcount
+                logger.info(f"Deleted {deleted_count} departments from tenant {tenant_id} that no longer exist in Anybase")
+
+        # Use bulk upsert to sync/update departments
+        if departments_data:
+            await async_db_ops.bulk_upsert_departments(departments_data)
+            logger.info(f"Successfully synced {len(departments_data)} departments from Anybase for tenant {tenant_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to sync departments for tenant {tenant_id}: {e}")
+        raise
+
+
+@router.get("/departments", tags=["departments"])
+async def get_departments_view(
+    session: AsyncSessionDep,
+    user: User = Depends(required_user),
+    tenant_id: Optional[str] = None,
+    hierarchical: bool = True,
+) -> view_models.DepartmentList:
+    """
+    Get department organization structure information.
+    
+    Args:
+        tenant_id: Optional tenant ID to filter departments. If not provided, uses user's current tenant.
+        hierarchical: If True, returns departments in hierarchical structure with children.
+    
+    Returns:
+        List of departments, optionally structured hierarchically.
+    """
+    from sqlalchemy import select
+
+    # If no tenant_id provided, try to get from user context or use a default approach
+    if not tenant_id:
+        # For now, get all departments if user is admin, or departments from user's tenant
+        if user.role == Role.ADMIN:
+            # Admin can see all departments
+            result = await session.execute(
+                select(Department).where(Department.status == DepartmentStatus.ACTIVE).order_by(Department.name)
+            )
+        else:
+            # Regular users can only see departments from their tenant (if they have department_id)
+            if hasattr(user, 'department_id') and user.department_id:
+                # Get user's department to find tenant_id
+                dept_result = await session.execute(
+                    select(Department).where(Department.id == user.department_id)
+                )
+                user_dept = dept_result.scalars().first()
+                if user_dept:
+                    result = await session.execute(
+                        select(Department).where(
+                            Department.tenant_id == user_dept.tenant_id,
+                            Department.status == DepartmentStatus.ACTIVE
+                        ).order_by(Department.name)
+                    )
+                else:
+                    # User has no valid department, return empty list
+                    return view_models.DepartmentList(items=[])
+            else:
+                # User has no department, return empty list
+                return view_models.DepartmentList(items=[])
+    else:
+        # Get departments for specific tenant
+        result = await session.execute(
+            select(Department).where(
+                Department.tenant_id == tenant_id,
+                Department.status == DepartmentStatus.ACTIVE
+            ).order_by(Department.name)
+        )
+
+    departments = result.scalars().all()
+    
+    if not hierarchical:
+        # Return flat list
+        department_list = []
+        for dept in departments:
+            department_list.append(
+                view_models.Department(
+                    id=dept.id,
+                    parent_id=dept.parent_id,
+                    name=dept.name,
+                    status=dept.status,
+                    group_path=dept.group_path,
+                    tenant_id=dept.tenant_id,
+                    created_at=dept.created_at.isoformat(),
+                    updated_at=dept.updated_at.isoformat(),
+                )
+            )
+        return view_models.DepartmentList(items=department_list)
+    
+    # Return hierarchical structure
+    dept_dict = {}
+    root_departments = []
+    
+    # First pass: create all department objects
+    for dept in departments:
+        dept_obj = view_models.Department(
+            id=dept.id,
+            parent_id=dept.parent_id,
+            name=dept.name,
+            status=dept.status,
+            group_path=dept.group_path,
+            tenant_id=dept.tenant_id,
+            created_at=dept.created_at.isoformat(),
+            updated_at=dept.updated_at.isoformat(),
+            children=[]
+        )
+        dept_dict[dept.id] = dept_obj
+        
+        # Track root departments (parent_id == "-1")
+        if dept.parent_id == "-1":
+            root_departments.append(dept_obj)
+    
+    # Second pass: build hierarchy
+    for dept in departments:
+        if dept.parent_id != "-1" and dept.parent_id in dept_dict:
+            parent_dept = dept_dict[dept.parent_id]
+            if parent_dept.children is None:
+                parent_dept.children = []
+            parent_dept.children.append(dept_dict[dept.id])
+    
+    return view_models.DepartmentList(items=root_departments)

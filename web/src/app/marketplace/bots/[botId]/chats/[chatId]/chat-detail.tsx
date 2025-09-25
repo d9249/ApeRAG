@@ -3,11 +3,8 @@ import { ChatDetails } from '@/api';
 import { ChatMessages } from '@/components/chat/chat-messages';
 import { PageContainer, PageContent } from '@/components/page-container';
 import { useBotContext } from '@/components/providers/bot-provider';
-import { Button } from '@/components/ui/button';
 import _ from 'lodash';
-import { Settings } from 'lucide-react';
 import { useTranslations } from 'next-intl';
-import Link from 'next/link';
 import { BotHeader } from '../bot-header';
 
 export const ChatDetail = ({ chat }: { chat: ChatDetails }) => {
@@ -18,8 +15,8 @@ export const ChatDetail = ({ chat }: { chat: ChatDetails }) => {
     <PageContainer>
       <BotHeader
         breadcrumbs={[
-          { title: page_bot('metadata.title'), href: `/bots` },
-          { title: bot?.title || '', href: `/bots/${bot?.id}` },
+          { title: page_bot('shared_bots'), href: `/marketplace/bots` },
+          { title: bot?.title || '' },
           {
             title:
               page_chat('metadata.title') +
@@ -29,13 +26,6 @@ export const ChatDetail = ({ chat }: { chat: ChatDetails }) => {
                 : chat.title || ''),
           },
         ]}
-        extra={
-          <Button size="icon" variant="ghost">
-            <Link href={`/bots/${bot?.id}`}>
-              <Settings />
-            </Link>
-          </Button>
-        }
       />
       <PageContent>
         <ChatMessages chat={chat} />

@@ -29,6 +29,8 @@ paths:
     $ref: './paths/flow.yaml#/flow'
   /bots/{bot_id}/flow/debug:
     $ref: './paths/bots.yaml#/debugFlow'
+  /bots/{bot_id}/sharing:
+    $ref: './paths/bots.yaml#/botSharing'
 
   # chats
   /bots/{bot_id}/chats:
@@ -116,6 +118,12 @@ paths:
   /marketplace/collections/{collection_id}/graph:
     $ref: './paths/marketplace.yaml#/marketplaceCollectionGraph'
 
+  # Bot marketplace
+  /marketplace/bots:
+    $ref: './paths/marketplace.yaml#/marketplaceBots'
+  /marketplace/bots/{bot_id}:
+    $ref: './paths/marketplace.yaml#/marketplaceBot'
+
   # object storage sync
   /collections/{collection_id}/sync:
     $ref: './paths/collections.yaml#/sync_object_storage'
@@ -183,6 +191,8 @@ paths:
     $ref: './paths/auth.yaml#/changePassword'
   /users/{user_id}:
     $ref: './paths/auth.yaml#/deleteUser'
+  /departments:
+    $ref: './paths/auth.yaml#/departments'
 
   # quotas
   /quotas:

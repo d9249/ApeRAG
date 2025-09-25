@@ -20,10 +20,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from aperag.db.models import User
 from aperag.exceptions import (
     AlreadySubscribedError,
+    AlreadySubscribedToBotError,
+    BotNotFoundException,
+    BotNotPublishedError,
     CollectionNotPublishedError,
+    SelfBotSubscriptionError,
     SelfSubscriptionError,
 )
 from aperag.schema import view_models
+from aperag.service.bot_marketplace_service import bot_marketplace_service
 from aperag.service.marketplace_service import marketplace_service
 from aperag.views.auth import optional_user, required_user
 
@@ -95,4 +100,73 @@ async def unsubscribe_collection(
         return {"message": "Successfully unsubscribed"}
     except Exception as e:
         logger.error(f"Error unsubscribing from collection {collection_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# Bot marketplace endpoints
+@router.get("/marketplace/bots", response_model=view_models.SharedBotList)
+async def list_marketplace_bots(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    type: str = Query(None, description="Bot type filter"),
+    user: User = Depends(optional_user),
+) -> view_models.SharedBotList:
+    """List all published bots in marketplace"""
+    try:
+        # Allow unauthenticated access - use empty user_id for anonymous users
+        user_id = str(user.id) if user else ""
+        result = await bot_marketplace_service.list_published_bots(user_id, page, page_size, type)
+        return result
+    except Exception as e:
+        logger.error(f"Error listing marketplace bots: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/marketplace/bots/{bot_id}", response_model=view_models.SharedBot)
+async def get_marketplace_bot(
+    bot_id: str,
+    user: User = Depends(required_user),
+) -> view_models.SharedBot:
+    """Get marketplace bot details (read-only access)"""
+    try:
+        # Get user's department ID
+        user_department_id = user.department_id
+        
+        # Get accessible bots for the user
+        bots_data, _ = await bot_marketplace_service.db_ops.get_accessible_bots_for_user(
+            user_department_id=user_department_id, page=1, page_size=1000  # Large page to get all
+        )
+        
+        # Find the specific bot
+        bot_data = None
+        for data in bots_data:
+            if data["id"] == bot_id:
+                bot_data = data
+                break
+                
+        if not bot_data:
+            raise HTTPException(status_code=404, detail="Bot not found or not accessible")
+            
+        # Convert to SharedBot
+        from aperag.schema.utils import parseBotConfig, convertToSharedBotConfig
+        bot_config = parseBotConfig(bot_data["config"])
+        shared_config = convertToSharedBotConfig(bot_config)
+        
+        return view_models.SharedBot(
+            id=bot_data["id"],
+            title=bot_data["title"],
+            description=bot_data["description"],
+            type=bot_data["type"],
+            owner_user_id=bot_data["owner_user_id"],
+            owner_username=bot_data["owner_username"],
+            subscription_id=None,  # No subscription needed
+            gmt_subscribed=None,
+            config=shared_config,
+            is_subscribed=True,  # All accessible bots are "subscribed"
+            is_owner=bot_data["owner_user_id"] == str(user.id),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting marketplace bot {bot_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

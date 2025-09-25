@@ -17,10 +17,15 @@ from typing import List, Optional, Tuple
 from sqlalchemy import and_, desc, func, select
 
 from aperag.db.models import (
+    Bot,
+    BotMarketplace,
+    BotMarketplaceStatusEnum,
+    BotStatus,
     Collection,
     CollectionMarketplace,
     CollectionMarketplaceStatusEnum,
     CollectionStatus,
+    Department,
     User,
     UserCollectionSubscription,
 )
@@ -425,3 +430,238 @@ class AsyncMarketplaceRepositoryMixin(AsyncRepositoryProtocol):
             return collections, total
 
         return await self._execute_query(_query)
+
+    # Bot marketplace sharing operations
+    async def publish_bot_to_departments(
+        self, bot_id: str, group_ids: List[str], status: str = BotMarketplaceStatusEnum.PUBLISHED.value
+    ) -> List[BotMarketplace]:
+        """Publish a bot to specific departments or globally"""
+
+        async def _operation(session):
+            # First, soft delete existing marketplace entries for this bot
+            existing_stmt = select(BotMarketplace).where(
+                BotMarketplace.bot_id == bot_id, BotMarketplace.gmt_deleted.is_(None)
+            )
+            result = await session.execute(existing_stmt)
+            existing_entries = result.scalars().all()
+
+            current_time = utc_now()
+            
+            # Soft delete existing entries
+            for entry in existing_entries:
+                entry.gmt_deleted = current_time
+                entry.gmt_updated = current_time
+                session.add(entry)
+
+            # Create new marketplace entries for each group
+            new_entries = []
+            for group_id in group_ids:
+                marketplace_entry = BotMarketplace(
+                    bot_id=bot_id,
+                    group_id=group_id,
+                    status=status,
+                    gmt_created=current_time,
+                    gmt_updated=current_time,
+                )
+                session.add(marketplace_entry)
+                new_entries.append(marketplace_entry)
+
+            await session.flush()
+            for entry in new_entries:
+                await session.refresh(entry)
+            return new_entries
+
+        return await self.execute_with_transaction(_operation)
+
+    async def get_bot_marketplace_entries_by_bot_id(self, bot_id: str) -> List[BotMarketplace]:
+        """Get all bot marketplace records by bot_id"""
+
+        async def _query(session):
+            stmt = select(BotMarketplace).where(
+                BotMarketplace.bot_id == bot_id, BotMarketplace.gmt_deleted.is_(None)
+            ).order_by(BotMarketplace.gmt_created.desc())
+            result = await session.execute(stmt)
+            return result.scalars().all()
+
+        return await self._execute_query(_query)
+
+    async def unpublish_bot(self, bot_id: str) -> int:
+        """
+        Unpublish bot from marketplace by soft deleting all marketplace entries
+        Returns the number of entries that were unpublished
+        """
+
+        async def _operation(session):
+            # Find all published marketplace records for this bot
+            stmt = select(BotMarketplace).where(
+                BotMarketplace.bot_id == bot_id,
+                BotMarketplace.status == BotMarketplaceStatusEnum.PUBLISHED.value,
+                BotMarketplace.gmt_deleted.is_(None),
+            )
+            result = await session.execute(stmt)
+            marketplace_entries = result.scalars().all()
+
+            if not marketplace_entries:
+                return 0
+
+            current_time = utc_now()
+            count = 0
+
+            # Soft delete all marketplace entries
+            for marketplace in marketplace_entries:
+                marketplace.gmt_deleted = current_time
+                marketplace.gmt_updated = current_time
+                session.add(marketplace)
+                count += 1
+
+            await session.flush()
+            return count
+
+        return await self.execute_with_transaction(_operation)
+
+    async def soft_delete_bot_marketplace(self, bot_id: str) -> bool:
+        """
+        Soft delete all bot marketplace records
+        This is called when a bot is deleted
+        Returns True if marketplace records were found and deleted, False otherwise
+        """
+
+        async def _operation(session):
+            # Find all marketplace records for this bot
+            stmt = select(BotMarketplace).where(
+                BotMarketplace.bot_id == bot_id, BotMarketplace.gmt_deleted.is_(None)
+            )
+            result = await session.execute(stmt)
+            marketplace_entries = result.scalars().all()
+
+            if not marketplace_entries:
+                return False
+
+            current_time = utc_now()
+
+            # Soft delete all marketplace records
+            for marketplace in marketplace_entries:
+                marketplace.gmt_deleted = current_time
+                marketplace.gmt_updated = current_time
+                session.add(marketplace)
+
+            await session.flush()
+            return True
+
+        return await self.execute_with_transaction(_operation)
+
+    async def get_accessible_bots_for_user(
+        self, user_department_id: Optional[str], page: int = 1, page_size: int = 12, bot_type: str = None
+    ) -> Tuple[List[dict], int]:
+        """
+        Get all bots accessible to a user based on their department
+        Returns (bots_data, total_count)
+        """
+
+        async def _query(session):
+            # Get user's department hierarchy (all parent departments)
+            accessible_group_ids = ["*"]  # Global bots are always accessible
+
+            if user_department_id:
+                # Get user's department
+                dept_result = await session.execute(
+                    select(Department).where(Department.id == user_department_id)
+                )
+                user_dept = dept_result.scalars().first()
+
+                if user_dept and user_dept.group_path:
+                    # Extract all parent department IDs from group_path
+                    # e.g., "/dp_1/dp_2" -> ["dp_1", "dp_2"]
+                    path_parts = user_dept.group_path.strip("/").split("/")
+                    accessible_group_ids.extend([part for part in path_parts if part])
+
+                # Also include the user's direct department
+                accessible_group_ids.append(user_department_id)
+
+            # Base query for accessible published bots
+            base_stmt = (
+                select(
+                    Bot.id.label("bot_id"),
+                    Bot.title,
+                    Bot.description,
+                    Bot.type,
+                    Bot.config,
+                    Bot.gmt_created,
+                    Bot.gmt_updated,
+                    Bot.user.label("owner_user_id"),
+                    User.username.label("owner_username"),
+                    BotMarketplace.id.label("marketplace_id"),
+                    BotMarketplace.group_id,
+                    BotMarketplace.status.label("marketplace_status"),
+                    BotMarketplace.gmt_created.label("published_at"),
+                )
+                .select_from(Bot)
+                .join(BotMarketplace, Bot.id == BotMarketplace.bot_id)
+                .outerjoin(User, Bot.user == User.id)
+                .where(
+                    and_(
+                        Bot.status == BotStatus.ACTIVE.value,
+                        Bot.gmt_deleted.is_(None),
+                        BotMarketplace.status == BotMarketplaceStatusEnum.PUBLISHED.value,
+                        BotMarketplace.group_id.in_(accessible_group_ids),
+                        BotMarketplace.gmt_deleted.is_(None),
+                    )
+                )
+            )
+
+            # Add bot type filter if specified
+            if bot_type:
+                base_stmt = base_stmt.where(Bot.type == bot_type)
+
+            # Order by bot ID first (required for DISTINCT ON), then by published time (newest first)
+            base_stmt = base_stmt.order_by(Bot.id, desc(BotMarketplace.gmt_created))
+
+            # Count total unique bots (since one bot might be published to multiple departments)
+            count_stmt = (
+                select(func.count(func.distinct(Bot.id)))
+                .select_from(Bot)
+                .join(BotMarketplace, Bot.id == BotMarketplace.bot_id)
+            ).where(
+                and_(
+                    Bot.status == BotStatus.ACTIVE.value,
+                    Bot.gmt_deleted.is_(None),
+                    BotMarketplace.status == BotMarketplaceStatusEnum.PUBLISHED.value,
+                    BotMarketplace.group_id.in_(accessible_group_ids),
+                    BotMarketplace.gmt_deleted.is_(None),
+                )
+            )
+            
+            if bot_type:
+                count_stmt = count_stmt.where(Bot.type == bot_type)
+                
+            count_result = await session.execute(count_stmt)
+            total = count_result.scalar()
+
+            # Apply pagination and get distinct bots
+            offset = (page - 1) * page_size
+            stmt = base_stmt.distinct(Bot.id).limit(page_size).offset(offset)
+            result = await session.execute(stmt)
+
+            bots = []
+            for row in result:
+                bots.append(
+                    {
+                        "id": row.bot_id,
+                        "title": row.title,
+                        "description": row.description,
+                        "type": row.type,
+                        "config": row.config,
+                        "gmt_created": row.gmt_created,
+                        "gmt_updated": row.gmt_updated,
+                        "marketplace_status": row.marketplace_status,
+                        "published_at": row.published_at,
+                        "owner_user_id": row.owner_user_id,
+                        "owner_username": row.owner_username,
+                        "group_id": row.group_id,
+                    }
+                )
+
+            return bots, total
+
+        return await self._execute_query(_query)
+
