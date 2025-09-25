@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from database import get_db, init_db, Document, Collection, ProcessingTask, DocumentStatus
-from celery_tasks import parse_document_task, index_document_task, process_document_workflow
+from services.graph_service import get_graph_service, DocumentData, cleanup_graph_service
 from settings import settings, UPLOAD_DIR
 
 # Initialize database on startup
@@ -315,6 +315,136 @@ async def delete_document(document_id: int, db: Session = Depends(get_db)):
     db.commit()
     
     return {"message": "Document deleted successfully"}
+
+
+# 그래프 생성 관련 API 엔드포인트
+@app.post("/documents/{document_id}/graph")
+async def create_document_graph(document_id: int, db: Session = Depends(get_db)):
+    """
+    문서의 그래프 생성 (LightRAG 기반)
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    if not document.parsed_content:
+        raise HTTPException(status_code=400, detail="Document must be parsed first")
+    
+    try:
+        # GraphService 인스턴스 가져오기
+        graph_service = await get_graph_service(workspace=f"doc_{document_id}")
+        
+        # 문서 데이터 생성
+        document_data = DocumentData(
+            content=str(document.parsed_content),
+            doc_id=str(document_id),
+            file_path=str(document.original_filename)
+        )
+        
+        # 그래프 처리 실행
+        result = await graph_service.process_document(document_data)
+        
+        if result.success:
+            # 그래프 생성 성공시 DB 업데이트
+            db.query(Document).filter(Document.id == document_id).update(
+                {"graph_indexed": True}
+            )
+            db.commit()
+            
+            return {
+                "status": "success",
+                "message": result.message,
+                "data": {
+                    "document_id": document_id,
+                    "chunks_created": result.chunks_created,
+                    "entities_extracted": result.entities_extracted,
+                    "relations_extracted": result.relations_extracted,
+                    "groups_processed": result.groups_processed,
+                    "processing_time": result.processing_time
+                }
+            }
+        else:
+            return {
+                "status": "error",
+                "message": result.message,
+                "error": result.error
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Graph creation failed: {str(e)}")
+
+
+@app.get("/documents/{document_id}/graph/labels")
+async def get_document_graph_labels(document_id: int, db: Session = Depends(get_db)):
+    """
+    문서의 그래프 라벨 조회
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    if not document.graph_indexed:
+        raise HTTPException(status_code=400, detail="Document graph not indexed yet")
+    
+    try:
+        graph_service = await get_graph_service(workspace=f"doc_{document_id}")
+        labels = await graph_service.get_graph_labels()
+        
+        return {
+            "status": "success",
+            "data": {
+                "document_id": document_id,
+                "labels": labels,
+                "label_count": len(labels)
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get graph labels: {str(e)}")
+
+
+@app.post("/documents/{document_id}/graph/query")
+async def query_document_graph(document_id: int, query: Dict[str, Any], db: Session = Depends(get_db)):
+    """
+    문서의 그래프에 질의
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    if not document.graph_indexed:
+        raise HTTPException(status_code=400, detail="Document graph not indexed yet")
+    
+    query_text = query.get("query", "")
+    mode = query.get("mode", "hybrid")
+    
+    if not query_text:
+        raise HTTPException(status_code=400, detail="Query text is required")
+    
+    try:
+        graph_service = await get_graph_service(workspace=f"doc_{document_id}")
+        answer = await graph_service.query_knowledge(query_text, mode)
+        
+        return {
+            "status": "success",
+            "data": {
+                "document_id": document_id,
+                "query": query_text,
+                "mode": mode,
+                "answer": answer
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    애플리케이션 종료시 그래프 서비스 정리
+    """
+    await cleanup_graph_service()
 
 
 if __name__ == "__main__":
