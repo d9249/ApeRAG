@@ -22,6 +22,8 @@ ApeRAG 是你构建自己的知识图谱、进行上下文工程以及部署能�
 
 ## 快速开始
 
+> 视频教程：https://www.bilibili.com/video/BV1shJQzQEoN/?vd_source=18935912aec0fb362ed3f5ffcc8eec8d
+
 > 在安装 ApeRAG 之前，请确保您的机器满足以下最低系统要求：
 >
 > - CPU >= 2 核心
@@ -49,7 +51,7 @@ ApeRAG 支持 [MCP（模型上下文协议）](https://modelcontextprotocol.io/)
 {
   "mcpServers": {
     "aperag-mcp": {
-      "url": "https://rag.apecloud.com/mcp",
+      "url": "https://rag.apecloud.com/mcp/",
       "headers": {
         "Authorization": "Bearer your-api-key-here"
       }
